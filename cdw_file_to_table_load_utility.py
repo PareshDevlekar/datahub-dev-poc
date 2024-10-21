@@ -1,0 +1,228 @@
+"""
+This module provides utilities for performing ETL tasks: LOADING FILE'S DATA TO A TABLE
+Created Date: 2023-07-01
+Author: Paresh Devlekar
+Last Updated Date: 2023-07-01
+"""
+
+import oracledb
+import boto3
+import pandas as pd
+from datetime import datetime
+import csv
+from variables_dev import cdw_variables as cdw_vars
+import sys
+import math
+
+if sys.version_info[0] < 3:
+    from StringIO import StringIO   # Python 2.x
+else:
+    from io import StringIO   # Python 3.x
+    from io import BytesIO    # Python 3.x
+
+def read_from_s3_and_write_to_oracle(source_filepath, staging_tablename):    
+    
+    def connect_to_oracledb():
+        try:
+            # Initializes the Oracle client library (assuming it's installed)
+            oracledb.init_oracle_client()
+            # Establishes a connection to the Oracle database using credentials and connection details stored in cdw_vars (module containing configuration variables)
+            connection = oracledb.connect(
+                user=cdw_vars.CDW_USER,
+                password=cdw_vars.CDW_PASS,
+                host=cdw_vars.HOST,
+                port=cdw_vars.PORT,
+                service_name=cdw_vars.SERVICE_NAME) 
+            print(connection)   # Prints the connection information for debugging purpose
+            return connection   # If successful, the connection object is returned
+        except Exception as e:
+            print(f'Error connecting to the database: {e}')
+            return None
+    
+    def delete_existing_data_before_load(staging_tablename):
+        try:
+            connection = connect_to_oracledb()
+            cursor = connection.cursor()
+            truncate_query = f'TRUNCATE TABLE {staging_tablename}'
+            # Executes the constructed truncate query using the cursor object.
+            cursor.execute(truncate_query)
+            print(f'Truncated table {staging_tablename}')
+        except Exception as e:
+            print(f'Error truncating table - {e}')
+        # finally block guarantees that the code within it executes always, even if exceptions occur during the function's main execution or within the try or except blocks.
+        # In database operations, it's crucial to close cursors and connections when you're done with them to avoid resource leaks and potential issues with subsequent database interactions.
+        finally:
+            if cursor:
+                cursor.close()  # Close the database cursor object, releasing resources associated with it.
+            if connection:
+                connection.close()  # Close the database connection, freeing up resources on the database server.
+    
+    def validate_by_count_query(staging_tablename):
+        try:
+            connection = connect_to_oracledb()
+            cursor = connection.cursor()
+            count_validation_query = f'SELECT COUNT(*) AS ct_recs FROM {staging_tablename}'
+            # Executes the constructed count query using the cursor object.
+            cursor.execute(count_validation_query)
+            # Retrives the first row (since it's a count query, there's only one row) from the result set. The first element of that row contains the count value, which is assigned to the variable records_count.
+            records_count = cursor.fetchone()[0]
+            print(f'Number of rows in {staging_tablename} - {records_count}', end='\n\n')
+        except Exception as e:
+            print(f'Failed to retrieve record count - {e}')
+        # In database operations, it's crucial to close cursors and connections when you're done with them to avoid resource leaks and potential issues with subsequent database interactions. 
+        finally:
+            if cursor:
+                cursor.close()  # Close the database cursor object, releasing resources associated with it.
+            if connection:
+                connection.close()  # Close the database connection, freeing up resources on the database server.
+
+    def retrieve_staging_table_column_names(staging_tablename):
+        try:
+            connection = connect_to_oracledb()
+            cursor = connection.cursor()      
+
+            # Ex - SELECT column_name FROM sys.all_tab_columns WHERE owner = UPPER('CDW_STG') AND table_name = UPPER('TBL_USR_CORR_AC_ORGCODE') ORDER BY column_id
+            # The query selects the `column_name` from `sys.all_tab_columns` view , which contains metadata about all columns in all tables.
+            queryToFetchTableColumnNames = f"SELECT column_name FROM sys.all_tab_columns WHERE owner = UPPER({staging_tablename.split('.')[0]}) AND table_name = UPPER({staging_tablename.split('.')[1]}) ORDER BY column_id"
+            # Then, the query `queryToFetchTableColumnNames` is executed using a database cursor. This sends the SQL command to the database for processing.
+            cursor.execute(queryToFetchTableColumnNames)
+            # Retrieves all the rows returned by executed query, in this case each row corresponds to a column name in the specified table.
+            records = cursor.fetchall()
+            # Creates a pandas dataframe `stagingTableColumnsDF` from the fetched records.
+            stagingTableColumnsDF = pd.DataFrame.from_records(records, columns = [x[0] for x in cursor.description])
+            # `stagingTableColumnsDF.values` --> Gets the underlying data of the dataframe as a NumPy array. 
+            # .squeeze() --> is called to reduce any dimensions of size one (Note: This is useful if there's only one column).
+            # `.tolist()` converts the NumPy array to a standard Python list.
+            stagingTableColumns = stagingTableColumnsDF.values.squeeze().tolist()
+
+            # Following line is crucial. It commits the changes made by the insert operation to the database. Without a commit, the data might not be permanently written.
+            connection.commit()
+            print(f'--------------The fields contained within the table {staging_tablename} are:\n{stagingTableColumns}--------------\n')
+            return stagingTableColumns
+        except Exception as e:
+            print(f'Failed to retrieve the staging table fields - {e}')
+        # In database operations, it's crucial to close cursors and connections when you're done with them to avoid resource leaks and potential issues with subsequent database interactions.
+        finally:
+            if cursor:
+                cursor.close()  # Close the database cursor object, releasing resources associated with it.
+            if connection:
+                connection.close()  # Close the database connection, freeing up resources on the database server.  
+
+    def load_csv_data_into_table(staging_tablename, staging_table_columns, dataDF_columns, modified_dataInsertionTuples):
+        try:
+            connection = connect_to_oracledb()
+            cursor = connection.cursor()
+        
+            # # Below code sets up a mechanism to handle float values when interacting with an Oracle database by converting any NaN values to None before being inserted, ensuring that these NaN values are treated as NULL in the database.
+            # def input_type_handler(cursor, value, arraysize):                
+            #     if isinstance(value, float):     
+            #         # `oracledb.DB_TYPE_NUMBER` --> Specifies that the variable should be treated as a number type in the Oracle database.
+            #         # `inconverter` is a lambda function used to convert incoming values. It checks if `x` is nan (using math.isnan(x)). If it is, it converts x to None (which is generally a way to handle nan values in databases by converting them to NULL). If x is not nan, it returns the value as-is.
+            #         return cursor.var(oracledb.DB_TYPE_NUMBER, arraysize=arraysize, 
+            #                           inconverter=lambda x: None if math.isnan(x) else x)
+            # connection.inputtypehandler = input_type_handler    # Assigns the `input_type_handler` function to the `inputtypehandler` attribute of the connection object. This means that whenever the database connection needs to handle input data (e.g. inserting or updating values), it will use the `input_type_handler` function to process float values.
+            
+            # Below code efficiently creates a dynamic INSERT query that adapts to the number of columns in the dataframe. 
+            # The resulting query includes the target table name, a list of column names and an equal number of placeholders for data binding during insertion. It avoids manually listing column names and placeholders, making it flexible for dataframes with varying structures.
+            ## data_insertion_query = f"INSERT INTO {staging_tablename}({', '.join(dataDF_columns[x] for x in range(0, len(dataDF_columns)))}) VALUES({', '.join(':'+str(x+1) for x in range(0, len(dataDF_columns)))})"
+            ## print(data_insertion_query)     # Ex - INSERT INTO CDW_STG.STG_CDLBL_TRANSLATE(CODE_LABEL_CODE, CODE_LABEL_TYPE, SOURCE_TABLE, SOURCE_CODE, SOURCE_TYPE) VALUES(:1, :2, :3, :4, :5)
+            
+            # We encountered a scenario in which the column names of the table and the file were not aligned. 
+            # For example - the table `CDW_STG.TBL_USR_CORR_AC_ORGCODE` included columns named `ACTIVITY_CENTER_ID`, `ORG_CODE`, `VALID_FROM`, and `VALID_TO`, whereas the corresponding file contained columns named `AC_CODE`, `ORG_CODE`, `VALID_FROM`, and `VALID_TO`. Here, `AC_CODE` and `ACTIVITY_CENTER_ID` referred to the same data but were labeled differently.
+            # Consequently, we had to retract the following line of code --> data_insertion_query = f"INSERT INTO {staging_tablename}({', '.join(dataDF_columns[x] for x in range(0, len(dataDF_columns)))}) VALUES({', '.join(':'+str(x+1) for x in range(0, len(dataDF_columns)))})"
+            # This retraction was necessary because we initially assumed that the column names in both the table and the file would align. As a result, we referenced `dataDF_columns` in both places, which contains the column names extracted from the file.
+            data_insertion_query = f"INSERT INTO {staging_tablename}({', '.join(staging_table_columns[x] for x in range(0, len(staging_table_columns)))}) VALUES({', '.join(':'+str(x+1) for x in range(0, len(dataDF_columns)))})"
+            print(data_insertion_query)     # Ex - INSERT INTO CDW_STG.TBL_USR_CORR_AC_ORGCODE(ACTIVITY_CENTER_ID, ORG_CODE, VALID_FROM, VALID_TO) VALUES(:1, :2, :3, :4)
+
+            # executemany() method of the cursor object is efficient for inserting multiple rows at once. It takes the query and a list of tuples as arguments. Each tuple in the list represents a single row of data to be inserted.
+            cursor.executemany(data_insertion_query, modified_dataInsertionTuples)
+            # Following line is crucial. It commits the changes made by the insert operation to the database. Without a commit, the data might not be permanently written.
+            connection.commit()
+            print(f'--------------Data successfully inserted into table {staging_tablename}--------------\n')
+        # In database operations, it's crucial to close cursors and connections when you're done with them to avoid resource leaks and potential issues with subsequent database interactions.
+        finally:
+            if cursor:
+                cursor.close()  # Close the database cursor object, releasing resources associated with it.
+            if connection:
+                connection.close()  # Close the database connection, freeing up resources on the database server.  
+            
+            
+    # Creates a client object to interact with S3 services.
+    s3_client = boto3.client('s3')
+    
+    # Retrieves a list of objects from the specified S3 bucket.
+    # Bucket = cdw_vars.s3_bucket --> Specifies the name of the S3 bucket to list objects from.
+    # Prefix = 'inputstream/cdw/' --> Helps narrow down the search to a specific directory within the bucket.
+    # .get('Contents) --> Extracts the list of object details (files) from the response dictionary returned by list_objects_v2().
+    objects_list = s3_client.list_objects_v2(Bucket=cdw_vars.s3_bucket, Prefix='inputstream/cdw/').get('Contents')
+    
+    for obj in objects_list:
+        obj_name = obj['Key']   # Key --> The name that you assign to an object. You can use the object key to retrieve the object.
+        
+        dataDF_columns = []   # The list will be populated with column names as they are identified or processed.
+        dataInsertionTuples = []    # The list will be populated with tuples as data is processed or extracted.
+        
+        # Checks if the obj_name contains '.csv' or '.xlsx' extension using the find(). A non-negative value returned by .find() indicates that the string '.csv' was found within the obj_name.
+        # Also, checks if the obj_name matches the value stored in the source_filepath variable.
+        if (obj_name.find('.csv') != -1 or obj_name.find('.xlsx') != -1) and obj_name == source_filepath:
+            response = s3_client.get_object(Bucket=cdw_vars.s3_bucket, Key=obj_name)    # get_object() --> Retrieves an object from Amazon S3
+            
+            if obj_name.find('.csv') != -1:
+                # response['Body] --> Accesses the response body which contains the file content.
+                # .read() --> Reads the entire content of the body into a byte stream.
+                # .decode('utf-8') --> Decodes the byte stream into a string assuming the CSV file uses utf-8 encoding.
+                object_content = response['Body'].read().decode('utf-8')
+                
+                # Reads the decoded content (CSV data) into a pandas dataframe using pd.read_csv()
+                # StringIO(object_content) --> Creates an in-memory file-like object from the decoded string (CSV data).
+                dataDF = pd.read_csv(StringIO(object_content), delimiter=';', low_memory=False)
+                
+                # Extracts the column names from a pandas df and creates a regular python list.
+                dataDF_columns = dataDF.columns.values.tolist()
+                
+                # print(f'\n\nContents of {obj_name}\n{dataDF}\n')
+                
+                # Convert dataframe to list of tuples.  df.values --> Converts dataframe into list of lists and each list item will be a row. However, instead of list of lists we need list of tuples.
+                dataInsertionTuples = [tuple(x) for x in dataDF.values]
+            
+            elif obj_name.find('.xlsx') != -1:
+                # response['Body] --> Accesses the response body which contains the file content.
+                # .read() --> Reads the entire content of the body into a byte stream.
+                object_content = response['Body'].read()
+                
+                # Load the excel file into a pandas dataframe.
+                dataDF = pd.read_excel(BytesIO(object_content), engine = 'openpyxl')     # Use the 'openpyxl' library as the engine to handle the '.xlsx' file format
+            
+                # Extracts the column names from a pandas df and creates a regular python list.
+                dataDF_columns = dataDF.columns.values.tolist()
+                
+                # print(f'\n\nContents of {obj_name}\n{dataDF}\n')
+            
+                # Iterates over each row in a pandas DataFrame named `dataDF` and appends the row data as a tuple to a list called `dataInsertionTuples`.
+                for _, rowInDataDF in dataDF.iterrows():
+                    dataInsertionTuples.append(tuple(rowInDataDF))
+            
+            print(f'DataInsertion_Tuples =>\n{dataInsertionTuples}', end='\n\n')        
+            # Iterate through a list of tuples, converting any NaN float values to None. 
+            # This is useful in scenarios where `NaN` values need to be represented as `None (or NULL)` before inserting or using the data in a database or other systems where `NaN` is not an acceptable value.
+            modified_dataInsertionTuples = []
+            for dataTuple in dataInsertionTuples:
+                dataList = list(dataTuple)  # This is necessary because tuples are immutable (cannot be changed), but lists are mutable (can be modified).
+                for idx, value in enumerate(list(dataList)):
+                    if isinstance(value, float):
+                        if math.isnan(value):
+                            dataList[idx] = None
+                modified_dataTuple = tuple(dataList)
+                modified_dataInsertionTuples.append(modified_dataTuple)
+            print(f'DataFrame_Columns =>\n{dataDF_columns}', end='\n\n')
+            print(f'Modified_DataInsertion_Tuples =>\n{modified_dataInsertionTuples}', end='\n\n')
+            
+        delete_existing_data_before_load(staging_tablename)   # Deletes existing data from a staging table before loading new data.
+
+        validate_by_count_query(staging_tablename)      # Executes a count query on the staging table to potentially verify count of records before and after insertion.
+        
+        staging_table_columns = retrieve_staging_table_column_names(staging_tablename)      # Fetches the names of the columns in a specified database table.
+
+        load_csv_data_into_table(staging_tablename, staging_table_columns, dataDF_columns, modified_dataInsertionTuples)        # Handles the actual insertion of data into the database table.
+        
+        validate_by_count_query(staging_tablename)
