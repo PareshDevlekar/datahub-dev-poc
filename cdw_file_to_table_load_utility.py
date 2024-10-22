@@ -224,7 +224,6 @@ def read_from_s3_and_write_to_oracle(source_filepath, staging_tablename):
                 for _, rowInDataDF in dataDF.iterrows():
                     dataInsertionTuples.append(tuple(rowInDataDF))
             
-            # print(f'DataInsertion_Tuples =>\n{dataInsertionTuples}', end='\n\n')        
             # Iterate through a list of tuples, converting any NaN float values to None. 
             # This is useful in scenarios where `NaN` values need to be represented as `None (or NULL)` before inserting or using the data in a database or other systems where `NaN` is not an acceptable value.
             modified_dataInsertionTuples = []
@@ -237,7 +236,7 @@ def read_from_s3_and_write_to_oracle(source_filepath, staging_tablename):
                 modified_dataTuple = tuple(dataList)
                 modified_dataInsertionTuples.append(modified_dataTuple)
             print(f'DataFrame_Columns =>\n{dataDF_columns}', end='\n\n')
-            # print(f'Modified_DataInsertion_Tuples =>\n{modified_dataInsertionTuples}', end='\n\n')
+            print(f'Modified_DataInsertion_Tuples =>\n{modified_dataInsertionTuples}', end='\n\n')
             
             delete_existing_data_before_load(staging_tablename)   # Deletes existing data from a staging table before loading new data.
 
@@ -248,3 +247,6 @@ def read_from_s3_and_write_to_oracle(source_filepath, staging_tablename):
             load_csv_data_into_table(staging_tablename, staging_table_columns, dataDF_columns, modified_dataInsertionTuples)        # Handles the actual insertion of data into the database table.
             
             validate_by_count_query(staging_tablename)
+            
+            
+# INSERT INTO CDW_STG.TBL_PERSY_PERSYEXTENDED(ACTIVITY_CENTER_CODE, FUNCTIONAL_PROCESS_NAME, FUNCTIONAL_PROCESS_TYPE, FUNCTIONAL_PROCESS_SUBTYPE, ACTIVITY_CENTER_NL, ACTIVITY_CENTER_FR, ACTIVITY_CENTER_DE, PARENT_ACTIVITY_CENTER_CODE, PARENT_FUNCTIONAL_PROCESS, PARENT_FUNCTIONAL_PROCESS_TYPE, PARENT_ACTIVITY_CENTER, FRC_CODE, ORG_CODE, IS_INTERNAL, IS_REAL, STATUS, STATUS_VALID_FROM, SITE_NAME, OFFICIAL_STREET, OFFICIAL_HOUSE, OFFICIAL_BOX, OFFICIAL_POSTAL_CODE, OFFICIAL_MUNICIPALITY, CONTACT_PERSON, CONTACT_PHONE, CONTACT_FAX, CONTACT_EMAIL, NON_OFFICIAL_LANGUAGE, FIELD29, FIELD30, FIELD31, FIELD32, FIELD33, FIELD34, FIELD35, FIELD36, FIELD37, FIELD38, FIELD39, FIELD40, PROCESS_NAME, ETL_CYCLE) VALUES(:1, :2, :3, :4, :5, :6, :7, :8, :9, :10, :11, :12, :13, :14, :15, :16, :17, :18, :19, :20, :21, :22, :23, :24, :25, :26, :27, :28, :29, :30, :31, :32, :33, :34, :35, :36, :37, :38, :39, :40)
