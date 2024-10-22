@@ -21,7 +21,7 @@ else:
     from io import StringIO   # Python 3.x
     from io import BytesIO    # Python 3.x
 
-def read_from_s3_and_write_to_oracle(source_filepath, staging_tablename):    
+def read_from_s3_and_write_to_oracle(source_filepath, staging_tablename, stagingTableOptionalColumns):    
     
     def connect_to_oracledb():
         try:
@@ -77,7 +77,7 @@ def read_from_s3_and_write_to_oracle(source_filepath, staging_tablename):
             if connection:
                 connection.close()  # Close the database connection, freeing up resources on the database server.
 
-    def retrieve_staging_table_column_names(staging_tablename):
+    def retrieve_staging_table_column_names(staging_tablename, stagingTableOptionalColumns):
         try:
             connection = connect_to_oracledb()
             cursor = connection.cursor()      
@@ -100,26 +100,35 @@ def read_from_s3_and_write_to_oracle(source_filepath, staging_tablename):
             # `.tolist()` converts the NumPy array to a standard Python list.
             stagingTableColumns = stagingTableColumnsDF.values.squeeze().tolist()
 
-            # Encountered a scenario where the column names of an Oracle table included spaces, leading to the error [missing comma] in the INSERT statement. This error indicates a syntax issue, typically due to a missing comma in the list of fields or values.
-            # Ex - INSERT INTO CDW_STG.TBL_USR_MISSING_AC(ACTIVITY_CENTER_ID, AC_CODE, DESCRIPTION, Short Name, RC Code, Start of validity, End of validity, Current status, Name NL, Name FR, Name EN, Name DE, Working Area NL, Working Area FR, Working Area EN, Working Area DE, Is Accountable, Is Internal, Is Real, Activity Type EN, Activity Sub Type EN, Is Org) VALUES(:1, :2, :3, :4, :5, :6, :7, :8, :9, :10, :11, :12, :13, :14, :15, :16, :17, :18, :19, :20, :21, :22)
+            # We encountered an error `ORA-00947: not enough values` because the Oracle table contained 42 columns, while the source file being ingested only had 40 columns.
+            # For example - INSERT INTO CDW_STG.TBL_PERSY_PERSYEXTENDED(ACTIVITY_CENTER_CODE, FUNCTIONAL_PROCESS_NAME, FUNCTIONAL_PROCESS_TYPE, FUNCTIONAL_PROCESS_SUBTYPE, ACTIVITY_CENTER_NL, ACTIVITY_CENTER_FR, ACTIVITY_CENTER_DE, PARENT_ACTIVITY_CENTER_CODE, PARENT_FUNCTIONAL_PROCESS, PARENT_FUNCTIONAL_PROCESS_TYPE, PARENT_ACTIVITY_CENTER, FRC_CODE, ORG_CODE, IS_INTERNAL, IS_REAL, STATUS, STATUS_VALID_FROM, SITE_NAME, OFFICIAL_STREET, OFFICIAL_HOUSE, OFFICIAL_BOX, OFFICIAL_POSTAL_CODE, OFFICIAL_MUNICIPALITY, CONTACT_PERSON, CONTACT_PHONE, CONTACT_FAX, CONTACT_EMAIL, NON_OFFICIAL_LANGUAGE, FIELD29, FIELD30, FIELD31, FIELD32, FIELD33, FIELD34, FIELD35, FIELD36, FIELD37, FIELD38, FIELD39, FIELD40, PROCESS_NAME, ETL_CYCLE) 
+            #               VALUES(:1, :2, :3, :4, :5, :6, :7, :8, :9, :10, :11, :12, :13, :14, :15, :16, :17, :18, :19, :20, :21, :22, :23, :24, :25, :26, :27, :28, :29, :30, :31, :32, :33, :34, :35, :36, :37, :38, :39, :40)
+            # To resolve this, we need to ensure that the number of values we are trying to insert matches the number of columns in the table. We can either - 
+            #    1. Add default values - If there are columns in the table that can have default values, modify your INSERT statement to include those defaults.
+            #    2. Modify the Source File - Adjust the source file to include the necessary columns.
+            #    3. Change the SQL statement - If certain columns are optional, you may omit them from the INSERT statement. Just ensure that you only list the columns present in the source file.
+            # Below code creates a new list `stagingTableColumnsModifiedv1` that contains only the columns from `stagingTableColumns` that are NOT marked as optional.
+            stagingTableColumnsModifiedv1 = [stagingTableCol.strip() for stagingTableCol in stagingTableColumns if stagingTableCol.strip() not in stagingTableOptionalColumns]
+
+            # We encountered a scenario where the column names of an Oracle table included spaces, leading to the error [missing comma] in the INSERT statement. This error indicates a syntax issue, typically due to a missing comma in the list of fields or values.
+            # For example - INSERT INTO CDW_STG.TBL_USR_MISSING_AC(ACTIVITY_CENTER_ID, AC_CODE, DESCRIPTION, Short Name, RC Code, Start of validity, End of validity, Current status, Name NL, Name FR, Name EN, Name DE, Working Area NL, Working Area FR, Working Area EN, Working Area DE, Is Accountable, Is Internal, Is Real, Activity Type EN, Activity Sub Type EN, Is Org) VALUES(:1, :2, :3, :4, :5, :6, :7, :8, :9, :10, :11, :12, :13, :14, :15, :16, :17, :18, :19, :20, :21, :22)
             # Solution - In Oracle SQL, any column names that contain spaces must be enclosed in double quotes. 
             # Revised INSERT statement should look like this - INSERT INTO CDW_STG.TBL_USR_MISSING_AC(ACTIVITY_CENTER_ID, AC_CODE, DESCRIPTION, "Short Name", "RC Code", "Start of validity", "End of validity", "Current status", "Name NL", "Name FR", "Name EN", "Name DE", "Working Area NL", "Working Area FR", "Working Area EN", "Working Area DE", "Is Accountable", "Is Internal", "Is Real", "Activity Type EN", "Activity Sub Type EN", "Is Org") VALUES(:1, :2, :3, :4, :5, :6, :7, :8, :9, :10, :11, :12, :13, :14, :15, :16, :17, :18, :19, :20, :21, :22)
-            # Below code creates a new list `stagingTableColumnsModified` where -
-            #    1. If a space is found in the column name, it appends the column name to the `stagingTableColumnsModified` list, wrapped in double quotes.
-            #    2. If there are no spaces in the column name, it simply appends the original column name to the `stagingTableColumnsModified` list.
+            # Below code creates a new list `stagingTableColumnsModifiedv2` where -
+            #    1. If a space is found in the column name, it appends the column name to the `stagingTableColumnsModifiedv2` list, wrapped in double quotes.
+            #    2. If there are no spaces in the column name, it simply appends the original column name to the `stagingTableColumnsModifiedv2` list.
             # This is useful for preparing column names for SQL queries or other contexts where spaces in names need to be handled appropriately.
-            stagingTableColumnsModified = []
-            for stagingTableCol in stagingTableColumns:
-                stagingTableCol = stagingTableCol.strip()
+            stagingTableColumnsModifiedv2 = []
+            for stagingTableCol in stagingTableColumnsModifiedv1:
                 if re.search(r'\s', stagingTableCol) is not None:   # If a space is found, re.search returns a match object, which is considered True.
-                    stagingTableColumnsModified.append(f'"{stagingTableCol}"')
+                    stagingTableColumnsModifiedv2.append(f'"{stagingTableCol}"')
                 else:
-                    stagingTableColumnsModified.append(stagingTableCol)
+                    stagingTableColumnsModifiedv2.append(stagingTableCol)
 
             # Following line is crucial. It commits the changes made by the insert operation to the database. Without a commit, the data might not be permanently written.
             connection.commit()
-            print(f'--------------The fields contained within the table {staging_tablename} are:--------------\n{stagingTableColumnsModified}\n')
-            return stagingTableColumnsModified
+            print(f'--------------The fields contained within the table {staging_tablename} are:--------------\n{stagingTableColumnsModifiedv2}\n')
+            return stagingTableColumnsModifiedv2
         except Exception as e:
             print(f'Failed to retrieve the staging table fields - {e}')
         # In database operations, it's crucial to close cursors and connections when you're done with them to avoid resource leaks and potential issues with subsequent database interactions.
@@ -242,11 +251,8 @@ def read_from_s3_and_write_to_oracle(source_filepath, staging_tablename):
 
             validate_by_count_query(staging_tablename)      # Executes a count query on the staging table to potentially verify count of records before and after insertion.
             
-            staging_table_columns = retrieve_staging_table_column_names(staging_tablename)      # Fetches the names of the columns in a specified database table.
+            staging_table_columns = retrieve_staging_table_column_names(staging_tablename, stagingTableOptionalColumns)      # Fetches the names of the columns in a specified database table.
 
             load_csv_data_into_table(staging_tablename, staging_table_columns, dataDF_columns, modified_dataInsertionTuples)        # Handles the actual insertion of data into the database table.
-            
+
             validate_by_count_query(staging_tablename)
-            
-            
-# INSERT INTO CDW_STG.TBL_PERSY_PERSYEXTENDED(ACTIVITY_CENTER_CODE, FUNCTIONAL_PROCESS_NAME, FUNCTIONAL_PROCESS_TYPE, FUNCTIONAL_PROCESS_SUBTYPE, ACTIVITY_CENTER_NL, ACTIVITY_CENTER_FR, ACTIVITY_CENTER_DE, PARENT_ACTIVITY_CENTER_CODE, PARENT_FUNCTIONAL_PROCESS, PARENT_FUNCTIONAL_PROCESS_TYPE, PARENT_ACTIVITY_CENTER, FRC_CODE, ORG_CODE, IS_INTERNAL, IS_REAL, STATUS, STATUS_VALID_FROM, SITE_NAME, OFFICIAL_STREET, OFFICIAL_HOUSE, OFFICIAL_BOX, OFFICIAL_POSTAL_CODE, OFFICIAL_MUNICIPALITY, CONTACT_PERSON, CONTACT_PHONE, CONTACT_FAX, CONTACT_EMAIL, NON_OFFICIAL_LANGUAGE, FIELD29, FIELD30, FIELD31, FIELD32, FIELD33, FIELD34, FIELD35, FIELD36, FIELD37, FIELD38, FIELD39, FIELD40, PROCESS_NAME, ETL_CYCLE) VALUES(:1, :2, :3, :4, :5, :6, :7, :8, :9, :10, :11, :12, :13, :14, :15, :16, :17, :18, :19, :20, :21, :22, :23, :24, :25, :26, :27, :28, :29, :30, :31, :32, :33, :34, :35, :36, :37, :38, :39, :40)
