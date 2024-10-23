@@ -21,7 +21,7 @@ else:
     from io import StringIO   # Python 3.x
     from io import BytesIO    # Python 3.x
 
-def read_from_s3_and_write_to_oracle(source_filepath, staging_tablename, stagingTableOptionalColumns):    
+def read_from_s3_and_write_to_oracle(source_filepath, staging_tablename, stagingTableOptionalColumns=[]):    
     
     def connect_to_oracledb():
         try:
@@ -256,3 +256,5 @@ def read_from_s3_and_write_to_oracle(source_filepath, staging_tablename, staging
             load_csv_data_into_table(staging_tablename, staging_table_columns, dataDF_columns, modified_dataInsertionTuples)        # Handles the actual insertion of data into the database table.
 
             validate_by_count_query(staging_tablename)
+            
+# oracledb.exceptions.DatabaseError: ORA-12899: value too large for column "CDW_STG"."TBL_PERSY_PERSYEXTENDED"."STATUS" (actual: 7, maximum: 6)
