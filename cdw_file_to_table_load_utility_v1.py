@@ -173,14 +173,19 @@ def read_from_s3_and_write_to_oracle(
             # data_insertion_query = f"""INSERT INTO {staging_tablename}({', '.join(staging_table_columns[x] for x in range(0, len(staging_table_columns)))}) VALUES({', '.join(':'+str(x+1) for x in range(0, len(dataDF_columns)))})"""
             # print(data_insertion_query)     # Ex - INSERT INTO CDW_STG.TBL_USR_CORR_AC_ORGCODE(ACTIVITY_CENTER_ID, ORG_CODE, VALID_FROM, VALID_TO) VALUES(:1, :2, :3, :4)
 
+            # We encountered an error: `ORA-01843: not a valid month` while executing this INSERT statement --> INSERT INTO CDW_STG.TBL_USR_MISSING_HIERARCHIES(POSTAL_ORG_UNIT_ID_FROM, POSTAL_ORG_UNIT_ID_TO, EFFCTV_DATE_FROM, EFFCTV_DATE_TO, RELATION_TYPE, "LEVEL FROM PARENT") VALUES('abcd-1234', 'pqrs-6789', '01/10/2006', '31/12/2999', 'PARENT-CHILD', 1) 
+            # This error typically occurs when the date format of the input string does not match the expected date format in Oracle.
             # Below code snippet is designed to prepare a list of values for an SQL insert statement, specifically accommodating date columns that require conversion using the TO_DATE() function in Oracle.
+            # When you explicitly use TO_DATE(), you provide a format model that tells Oracle how to interpret each part of the date string. 
+            # If you don't use TO_DATE() and simply provide a date string, Oracle will attempt to interpret it based on the session's `NLS_DATE_FORMAT` setting. This format specifies the default way Oracle expects dates to be provided.
+            # Revised INSERT statement --> INSERT INTO CDW_STG.TBL_USR_MISSING_HIERARCHIES(POSTAL_ORG_UNIT_ID_FROM, POSTAL_ORG_UNIT_ID_TO, EFFCTV_DATE_FROM, EFFCTV_DATE_TO, RELATION_TYPE, "LEVEL FROM PARENT") VALUES('abcd-1234', 'pqrs-6789', TO_DATE('01/10/2006', 'DD/MM/YYYY'), TO_DATE('31/12/2999', 'DD/MM/YYYY'), 'PARENT-CHILD', 1) 
             valuesToInsert = []
             for x in range(0, len(dataDF_columns)):
                 dateColumnIndexExists = False
                 for dateColConversionDict in dateColumnConversion:
                     if x == dateColConversionDict['dateColumnIndex']:
                         dateColumnIndexExists = True
-                        valuesToInsert.append(f"""TO_DATE(:{x+1}, "{dateColConversionDict['dateColumnConversionFormat']}")""")
+                        valuesToInsert.append(f"""TO_DATE(:{x+1}, '{dateColConversionDict["dateColumnConversionFormat"]}')""")
                 if not dateColumnIndexExists:    
                     valuesToInsert.append(f""":{x+1}""")
             valuesToInsert = ', '.join(valuesToInsert)
@@ -221,7 +226,6 @@ def read_from_s3_and_write_to_oracle(
             response = s3_client.get_object(Bucket=cdw_vars.s3_bucket, Key=obj_name)    # get_object() --> Retrieves an object from Amazon S3
             
             if obj_name.endswith('.csv'):
-                print(f'{obj_name} is a CSV file', end = '\n\n')
                 # response['Body] --> Accesses the response body which contains the file content.
                 # .read() --> Reads the entire content of the body into a byte stream.
                 # .decode('utf-8') --> Decodes the byte stream into a string assuming the CSV file uses utf-8 encoding.
@@ -234,13 +238,10 @@ def read_from_s3_and_write_to_oracle(
                 # Extracts the column names from a pandas df and creates a regular python list.
                 dataDF_columns = dataDF.columns.values.tolist()
                 
-                # print(f'\n\nContents of {obj_name}\n{dataDF}\n')
-                
                 # Convert dataframe to list of tuples.  df.values --> Converts dataframe into list of lists and each list item will be a row. However, instead of list of lists we need list of tuples.
                 dataInsertionTuples = [tuple(x) for x in dataDF.values]
             
             elif obj_name.endswith('.xlsx'):
-                print(f'{obj_name} is an XLSX file', end = '\n\n')
                 # response['Body] --> Accesses the response body which contains the file content.
                 # .read() --> Reads the entire content of the body into a byte stream.
                 object_content = response['Body'].read()
@@ -250,8 +251,6 @@ def read_from_s3_and_write_to_oracle(
             
                 # Extracts the column names from a pandas df and creates a regular python list.
                 dataDF_columns = dataDF.columns.values.tolist()
-                
-                # print(f'\n\nContents of {obj_name}\n{dataDF}\n')
             
                 # Iterates over each row in a pandas DataFrame named `dataDF` and appends the row data as a tuple to a list called `dataInsertionTuples`.
                 for _, rowInDataDF in dataDF.iterrows():
@@ -280,3 +279,6 @@ def read_from_s3_and_write_to_oracle(
             load_csv_data_into_table(staging_tablename, staging_table_columns, dataDF_columns, modified_dataInsertionTuples, dateColumnConversion)        # Handles the actual insertion of data into the database table.
 
             validate_by_count_query(staging_tablename)
+
+# Note - To call a function in Python while skipping a parameter, you can use keyword arguments. This allows you to specify which arguments you are providing values for, without having to follow the positional order. 
+#        Using keyword arguments is an effective way to call functions when you want to skip certain parameters without affecting the order of the others. Just ensure that the parameters you want to skip have default values defined in the function signature.
